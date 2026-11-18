@@ -9,6 +9,7 @@
     '1080': { long: 1920, short: 1080, live: 2500000, lapse: 8000000 },
   };
   const INTERVALS = [1, 2, 5, 10];
+  const EYE_STYLES = ['none', 'round', 'smile', 'culprit'];
   const MONO = '"IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace';
   const SANS = '"IBM Plex Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif';
   const DISPLAY = '"Do Hyeon", "IBM Plex Sans KR", "Apple SD Gothic Neo", sans-serif';
@@ -30,7 +31,7 @@
     'cam', 'canvas', 'viewfinder', 'flash', 'vfEmpty', 'vfTitle', 'vfBody', 'vfBtn', 'recChip', 'recLabel', 'aiChip', 'aiChipLabel',
     'elapsed', 'outInfo', 'recBtn', 'recCaption', 'pauseBtn', 'pauseLabel', 'flipBtn',
     'modeSeg', 'modeLapse', 'modeHint', 'lapseGroup', 'lapseChips', 'lapseHint', 'qualSeg', 'sizeHint',
-    'optTimer', 'optClock', 'optMirror', 'optAnalysis', 'optShadow', 'optEyes', 'eyesRow', 'optVertical', 'optEndCard',
+    'optTimer', 'optClock', 'optMirror', 'optAnalysis', 'optShadow', 'eyeChips', 'eyesRow', 'optVertical', 'optEndCard',
     'aiStatus', 'aiBar', 'aiBarFill', 'aiHint',
     'result', 'playback', 'resLen', 'resStudy', 'resSize', 'resFmt', 'resName', 'saveLink', 'shareBtn', 'shareHint', 'cardShareBtn', 'againBtn',
     'report', 'repPct', 'repMeta', 'repTimeline', 'repEnd', 'repLegend', 'toast',
@@ -41,9 +42,14 @@
   // ---------- settings (remembered in this browser only) ----------
   const settings = {
     mode: 'normal', interval: 2, quality: '720', showTimer: true, showClock: false, mirror: false,
-    analysis: false, shadow: false, eyes: false, vertical: false, endCard: true,
+    analysis: false, shadow: false, eyeStyle: 'none', vertical: false, endCard: true,
   };
   try { Object.assign(settings, JSON.parse(localStorage.getItem('studycam:v1') || '{}')); } catch (_) {}
+  if ('eyes' in settings) { // older versions had one on/off switch for white eyes
+    if (settings.eyes && settings.eyeStyle === 'none') settings.eyeStyle = 'round';
+    delete settings.eyes;
+  }
+  if (!EYE_STYLES.includes(settings.eyeStyle)) settings.eyeStyle = 'none';
   if (!['normal', 'lapse'].includes(settings.mode)) settings.mode = 'normal';
   if (!INTERVALS.includes(settings.interval)) settings.interval = 2;
   if (!QUALITY[settings.quality]) settings.quality = '720';
@@ -257,7 +263,7 @@
       vis.segAt = now;
       AI.segment(el.cam, consumeMask);
     }
-    if (settings.eyes && AI.face && (force || now - vis.faceAt >= 100)) {
+    if (settings.eyeStyle !== 'none' && AI.face && (force || now - vis.faceAt >= 100)) {
       vis.faceAt = now;
       vis.face = AI.detectFace(el.cam);
       if (vis.face) vis.faceSeenAt = now;
@@ -272,23 +278,86 @@
     ctx.drawImage(maskCanvas, r.x, r.y - k, r.w, r.h);
     ctx.drawImage(maskCanvas, r.x, r.y + k, r.w, r.h);
   }
-  function drawEyes(r) {
-    const f = vis.face;
-    if (!f || performance.now() - vis.faceSeenAt > 700) return;
-    ctx.fillStyle = '#FFFFFF';
-    for (const [a, b] of [[33, 133], [362, 263]]) {
+  // Eye corners and iris centre from the face mesh, mapped onto the drawn video rectangle.
+  function eyeShapes(f, r) {
+    const out = [];
+    for (const [a, b, iris] of [[33, 133, 468], [362, 263, 473]]) {
       const p = f[a], q = f[b];
       if (!p || !q) continue;
-      const ax = r.x + p.x * r.w, ay = r.y + p.y * r.h;
-      const bx = r.x + q.x * r.w, by = r.y + q.y * r.h;
+      let ax = r.x + p.x * r.w, ay = r.y + p.y * r.h;
+      let bx = r.x + q.x * r.w, by = r.y + q.y * r.h;
+      if (bx < ax) { [ax, bx] = [bx, ax]; [ay, by] = [by, ay]; } // keep "up" pointing up
       const len = Math.hypot(bx - ax, by - ay);
       if (len < 2) continue;
+      const ir = f[iris];
+      out.push({
+        cx: (ax + bx) / 2, cy: (ay + by) / 2, len, ang: Math.atan2(by - ay, bx - ax),
+        ix: ir ? r.x + ir.x * r.w : null, iy: ir ? r.y + ir.y * r.h : null,
+      });
+    }
+    return out;
+  }
+  function fillCircle(x, y, rad) { ctx.beginPath(); ctx.arc(x, y, rad, 0, Math.PI * 2); ctx.fill(); }
+  function drawBlush(f, r, eyes) {
+    if (!eyes.length) return;
+    const len = eyes.reduce((s, e) => s + e.len, 0) / eyes.length;
+    const ang = eyes[0].ang;
+    ctx.fillStyle = 'rgba(255, 138, 160, 0.6)';
+    for (const k of [50, 280]) { // cheek points
+      const c = f[k];
+      if (!c) continue;
       ctx.save();
-      ctx.translate((ax + bx) / 2, (ay + by) / 2);
-      ctx.rotate(Math.atan2(by - ay, bx - ax));
+      ctx.translate(r.x + c.x * r.w, r.y + c.y * r.h);
+      ctx.rotate(ang);
       ctx.beginPath();
-      ctx.ellipse(0, 0, len * 0.72, len * 0.3, 0, 0, Math.PI * 2);
+      ctx.ellipse(0, 0, len * 0.6, len * 0.32, 0, 0, Math.PI * 2);
       ctx.fill();
+      ctx.restore();
+    }
+  }
+  function drawEyes(r) {
+    const style = settings.eyeStyle;
+    const f = vis.face;
+    if (style === 'none' || !f || performance.now() - vis.faceSeenAt > 700) return;
+    const eyes = eyeShapes(f, r);
+    if (style === 'round' || style === 'smile') drawBlush(f, r, eyes);
+    for (const e of eyes) {
+      const L = e.len;
+      ctx.save();
+      ctx.translate(e.cx, e.cy);
+      ctx.rotate(e.ang);
+      if (style === 'culprit') {
+        ctx.fillStyle = '#FFFFFF';
+        ctx.beginPath();
+        ctx.ellipse(0, 0, L * 0.72, L * 0.3, 0, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (style === 'round') {
+        const R = L * 0.62;
+        ctx.fillStyle = '#FFFFFF';
+        fillCircle(0, 0, R);
+        // The pupil follows where the real eye is looking.
+        let px = 0, py = 0;
+        if (e.ix != null) {
+          const dx = e.ix - e.cx, dy = e.iy - e.cy;
+          const c = Math.cos(-e.ang), s = Math.sin(-e.ang);
+          px = (dx * c - dy * s) * 1.6;
+          py = (dx * s + dy * c) * 1.6;
+          const max = R * 0.42, d = Math.hypot(px, py);
+          if (d > max) { px *= max / d; py *= max / d; }
+        }
+        ctx.fillStyle = '#16161A';
+        fillCircle(px, py, R * 0.52);
+        ctx.fillStyle = '#FFFFFF';
+        fillCircle(px - R * 0.18, py - R * 0.2, R * 0.17);
+      } else if (style === 'smile') {
+        ctx.strokeStyle = '#FFFFFF';
+        ctx.lineWidth = Math.max(2, L * 0.2);
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(-L * 0.5, L * 0.12);
+        ctx.quadraticCurveTo(0, -L * 0.55, L * 0.5, L * 0.12);
+        ctx.stroke();
+      }
       ctx.restore();
     }
   }
@@ -357,7 +426,7 @@
         // Privacy first: with no recent mask, hide the whole picture instead of showing the person.
         if (vis.maskAt && performance.now() - vis.maskAt < 1500) drawMask(r);
         else { ctx.fillStyle = SHADOW; ctx.fillRect(r.x, r.y, r.w, r.h); }
-        if (settings.eyes) drawEyes(r);
+        drawEyes(r);
       }
       ctx.restore();
     }
@@ -506,7 +575,7 @@
   function aiNeeds() {
     const n = new Set();
     if (settings.analysis) { n.add('seg'); n.add('face'); n.add('obj'); }
-    if (settings.shadow) { n.add('seg'); if (settings.eyes) n.add('face'); }
+    if (settings.shadow) { n.add('seg'); if (settings.eyeStyle !== 'none') n.add('face'); }
     return [...n];
   }
   const aiReady = () => aiNeeds().every((k) => AI[k]);
@@ -541,7 +610,7 @@
     } catch (_) {
       if (settings.analysis && !(AI.seg && AI.face && AI.obj)) settings.analysis = false;
       if (settings.shadow && !AI.seg) settings.shadow = false;
-      if (settings.eyes && !AI.face) settings.eyes = false;
+      if (settings.eyeStyle !== 'none' && !AI.face) settings.eyeStyle = 'none';
       saveSettings();
       renderControls();
       toast('AI를 불러오지 못했어요. 인터넷 연결을 확인하고 다시 켜 주세요.');
@@ -1004,7 +1073,7 @@
     el.optMirror.checked = settings.mirror;
     el.optAnalysis.checked = settings.analysis;
     el.optShadow.checked = settings.shadow;
-    el.optEyes.checked = settings.eyes;
+    el.eyeChips.querySelectorAll('button').forEach((b) => b.setAttribute('aria-checked', String(b.dataset.eye === settings.eyeStyle)));
     el.optVertical.checked = settings.vertical;
     el.optEndCard.checked = settings.endCard;
     el.eyesRow.hidden = !settings.shadow;
@@ -1048,7 +1117,11 @@
     vis.maskAt = 0; // start fully covered until the first fresh mask arrives
     saveSettings(); syncAI();
   });
-  el.optEyes.addEventListener('change', () => { settings.eyes = el.optEyes.checked; saveSettings(); syncAI(); });
+  el.eyeChips.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-eye]');
+    if (!b || b.disabled) return;
+    settings.eyeStyle = b.dataset.eye; saveSettings(); renderControls(); syncAI();
+  });
   el.optVertical.addEventListener('change', () => { settings.vertical = el.optVertical.checked; saveSettings(); sizeCanvas(); renderControls(); });
   el.optEndCard.addEventListener('change', () => { settings.endCard = el.optEndCard.checked; saveSettings(); });
 
