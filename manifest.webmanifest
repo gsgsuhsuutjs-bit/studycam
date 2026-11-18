@@ -1,7 +1,7 @@
 {
   "name": "공부캠",
   "short_name": "공부캠",
-  "description": "소리 없이 공부하는 모습만 찍는 카메라",
+  "description": "소리 없이 공부하는 모습만 찍는 카메라. AI 집중 분석과 그림자 모드.",
   "lang": "ko",
   "start_url": "./",
   "scope": "./",
